@@ -1,0 +1,663 @@
+import joblib
+import numpy as np
+import pandas as pd
+
+from sklearn.model_selection import train_test_split, KFold
+from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
+from sklearn.compose import ColumnTransformer
+from sklearn.pipeline import Pipeline
+from sklearn.impute import SimpleImputer
+from sklearn.preprocessing import OneHotEncoder
+from sklearn.linear_model import LinearRegression
+from sklearn.ensemble import RandomForestRegressor
+
+from xgboost import XGBRegressor
+
+# ==========================
+# CONFIG
+# ==========================
+CSV_PATH = "./cleaned.csv"
+OUTPUT_PATH = "price_predictor.pkl"
+
+TARGET = "sold_price"
+
+RANDOM_STATE = 42
+TEST_SIZE = 0.2
+N_SPLITS = 5
+
+MIN_PRICE = 1000
+MAX_PRICE = 100000
+
+BLEND_LINEAR_WEIGHT = 0.4
+BLEND_LOG_WEIGHT = 0.6
+
+if not np.isclose(BLEND_LINEAR_WEIGHT + BLEND_LOG_WEIGHT, 1.0):
+    raise ValueError("BLEND_LINEAR_WEIGHT + BLEND_LOG_WEIGHT must sum to 1.0")
+
+CURRENT_YEAR = 2026
+CAD_TO_USD = 0.73
+
+CAT_COLS = [
+    "make",
+    "model",
+    "fuel_type",
+    "transmission",
+    "drive_type",
+    "primary_damage",
+    "secondary_damage",
+]
+
+NUM_COLS = [
+    "mileage",
+    "engine_volume",
+    "cylinders",
+    "year",
+    "primary_damage_severity",
+    "secondary_damage_severity",
+    "make_model_year_price_median",
+]
+
+FEATURES = CAT_COLS + NUM_COLS
+
+# ==========================
+# METRICS / HELPERS
+# ==========================
+def evaluate_regression(y_true, y_pred, title="MODEL"):
+    y_true = np.asarray(y_true, dtype=float)
+    y_pred = np.asarray(y_pred, dtype=float)
+
+    mae = mean_absolute_error(y_true, y_pred)
+    rmse = np.sqrt(mean_squared_error(y_true, y_pred))
+    r2 = r2_score(y_true, y_pred)
+
+    mean_price_accuracy = (1 - (mae / y_true.mean())) * 100
+
+    print(f"\n{title}")
+    print(f"MAE                 : {mae:.2f}")
+    print(f"RMSE                : {rmse:.2f}")
+    print(f"R2                  : {r2:.4f}")
+    print(f"Mean Price Accuracy : {mean_price_accuracy:.2f}%")
+
+    return {
+        "MAE": mae,
+        "RMSE": rmse,
+        "R2": r2,
+        "Mean_Price_Accuracy": mean_price_accuracy,
+    }
+
+def blend_predictions(
+    pred_linear: np.ndarray,
+    pred_log: np.ndarray,
+    linear_weight: float,
+    log_weight: float,
+    min_price: float = MIN_PRICE,
+    max_price: float = MAX_PRICE,
+) -> np.ndarray:
+    pred_final = linear_weight * pred_linear + log_weight * pred_log
+    return np.clip(pred_final, min_price, max_price)
+
+NON_VISUAL_SEVERITY_MAP = {
+    "BIOHAZARD": 3,
+    "DAMAGE HISTORY": 1,
+    "ELECTRICAL": 2,
+    "ENGINE DAMAGE": 3,
+    "FRAME DAMAGE": 4,
+    "MECHANICAL": 2,
+    "MISSING/ALTERED VIN": 3,
+    "NORMAL WEAR & TEAR": 1,
+    "CASH FOR CLUNKERS": 2,
+    "REPOSSESSION": 1,
+    "SUSPENSION": 2,
+    "THEFT": 2,
+    "TRANSMISSION DAMAGE": 3,
+    "UNKNOWN": 1,
+    "WATER/FLOOD": 4,
+    "REPLACED VIN": 3,
+    "UNDERCARRIAGE": 2,
+}
+
+def normalize_damage_severity(
+    damage_col: pd.Series,
+    severity_col: pd.Series,
+) -> pd.Series:
+
+    severity = pd.to_numeric(severity_col, errors="coerce")
+
+    damage_clean = (
+        damage_col.fillna("UNKNOWN")
+        .astype(str)
+        .str.upper()
+        .str.strip()
+    )
+
+    severity = severity.replace([np.inf, -np.inf], np.nan)
+
+    non_visual_missing = (
+        damage_clean.isin(NON_VISUAL_SEVERITY_MAP.keys())
+        & (severity.isna() | (severity <= 0))
+    )
+
+    mapped_severity = damage_clean.map(NON_VISUAL_SEVERITY_MAP)
+
+    severity.loc[non_visual_missing] = mapped_severity.loc[non_visual_missing]
+
+    return severity
+
+# ==========================
+# OOF HELPERS
+# ==========================
+def make_group_key(frame: pd.DataFrame, cols: list[str]) -> pd.Series:
+    return frame[cols].apply(tuple, axis=1)
+
+def make_oof_group_median(
+    train_df: pd.DataFrame,
+    test_df: pd.DataFrame,
+    group_cols: list[str],
+    target_col: str,
+    n_splits: int = 5,
+    random_state: int = 42,
+):
+    kf = KFold(n_splits=n_splits, shuffle=True, random_state=random_state)
+
+    oof = pd.Series(index=train_df.index, dtype=float)
+    global_val = float(train_df[target_col].median())
+
+    for tr_idx, val_idx in kf.split(train_df):
+        tr = train_df.iloc[tr_idx]
+        val = train_df.iloc[val_idx]
+
+        grp_map = tr.groupby(group_cols)[target_col].median().to_dict()
+        val_key = make_group_key(val, group_cols)
+
+        oof.iloc[val_idx] = val_key.map(grp_map).fillna(global_val).values
+
+    full_map = train_df.groupby(group_cols)[target_col].median().to_dict()
+    test_key = make_group_key(test_df, group_cols)
+    test_feat = test_key.map(full_map).fillna(global_val)
+
+    return oof, test_feat, full_map, global_val
+
+# ==========================
+# BASE PREPROCESS
+# ==========================
+TEXT_COLS = [
+    "make",
+    "model",
+    "primary_damage",
+    "secondary_damage",
+    "transmission",
+    "fuel_type",
+    "drive_type",
+    "seller_type",
+    "color",
+]
+
+NUMERIC_PARSE_COLS = [
+    "sold_price",
+    "mileage",
+    "year",
+    "engine_volume",
+    "cylinders",
+]
+
+def preprocess_base_rowwise(df_raw: pd.DataFrame) -> pd.DataFrame:
+    df = df_raw.copy()
+    df = df.replace("", np.nan)
+    df["mileage"] = df["mileage"].replace(1, np.nan)
+
+    for col in TEXT_COLS:
+        if col not in df.columns:
+            df[col] = np.nan
+
+    if "currency" not in df.columns:
+        df["currency"] = "USD"
+    else:
+        df["currency"] = df["currency"]
+
+    for col in NUMERIC_PARSE_COLS:
+        if col not in df.columns:
+            df[col] = np.nan
+        df[col] = pd.to_numeric(df[col], errors="coerce")
+
+    mask_cad = df["currency"].eq("CAD")
+    df.loc[mask_cad, "sold_price"] = df.loc[mask_cad, "sold_price"] * CAD_TO_USD
+    df.loc[mask_cad, "currency"] = "USD"
+
+    return df.reset_index(drop=True)
+
+def fit_base_preprocess_bundle(train_df_rowwise: pd.DataFrame) -> dict:
+    df = train_df_rowwise.copy()
+
+    df = df[df["sold_price"].notna()]
+    df = df[df["sold_price"] >= MIN_PRICE]
+
+    df = df[df["year"].notna()]
+    df = df[(df["year"] >= 1980) & (df["year"] <= CURRENT_YEAR)]
+
+    df = df[df["mileage"] <= 400000]
+
+    upper_q = float(df["sold_price"].quantile(0.995)) if len(df) else MAX_PRICE
+    engine_volume_median = float(df["engine_volume"].median()) if df["engine_volume"].notna().any() else 2.0
+    cylinders_median = float(df["cylinders"].median()) if df["cylinders"].notna().any() else 4.0
+
+    rare_thresholds = {
+        "make": 100,
+        "model": 20,
+        "color": 100,
+    }
+
+    rare_maps = {}
+    for col, min_count in rare_thresholds.items():
+        if col not in df.columns:
+            continue
+        vc = df[col].value_counts(dropna=False)
+        keep_values = set(vc[vc >= min_count].index.tolist())
+        rare_maps[col] = keep_values
+
+    return {
+        "upper_price_quantile": upper_q,
+        "engine_volume_median": engine_volume_median,
+        "cylinders_median": cylinders_median,
+        "rare_maps": rare_maps,
+    }
+
+def apply_base_preprocess(
+    df_rowwise: pd.DataFrame,
+    base_bundle: dict,
+    is_training: bool = True,
+) -> pd.DataFrame:
+    df = df_rowwise.copy()
+
+    df = df[df["year"].notna()]
+    df = df[(df["year"] >= 1980) & (df["year"] <= CURRENT_YEAR)]
+
+    df = df[df["mileage"] <= 400000]
+
+    if is_training:
+        df = df[df["sold_price"].notna()]
+        df = df[df["sold_price"] >= MIN_PRICE]
+        df = df[df["sold_price"] <= base_bundle["upper_price_quantile"]]
+
+    df["engine_volume"] = df["engine_volume"].fillna(base_bundle["engine_volume_median"])
+    df["cylinders"] = df["cylinders"].fillna(base_bundle["cylinders_median"])
+
+    df["primary_damage_severity"] = normalize_damage_severity(
+        df["primary_damage"],
+        df["primary_damage_severity"],
+    )
+    df["secondary_damage_severity"] = normalize_damage_severity(
+        df["secondary_damage"],
+        df["secondary_damage_severity"],
+    )
+
+    df.loc[df["fuel_type"].isin(["ELECTRIC", "OTHER"]), ["engine_volume", "cylinders"]] = 0
+
+    for col in ["make", "model", "color"]:
+        keep_values = base_bundle["rare_maps"][col]
+        df[col] = df[col].where(df[col].isin(keep_values), "OTHER")
+
+    for col in CAT_COLS:
+        if col not in df.columns:
+            df[col] = "UNKNOWN"
+        df[col] = df[col].astype("string").fillna("UNKNOWN")
+
+    numeric_cols_to_clean = set(NUM_COLS + [TARGET])
+    for col in numeric_cols_to_clean:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors="coerce")
+            df[col] = df[col].replace([np.inf, -np.inf], np.nan)
+
+    return df.reset_index(drop=True)
+
+# ==========================
+# FEATURE ENGINEERING
+# ==========================
+def build_train_test_features(
+    train_df: pd.DataFrame,
+    test_df: pd.DataFrame,
+    target_col: str = TARGET,
+    n_splits: int = 5,
+    random_state: int = 42,
+):
+    train_df = train_df.copy()
+    test_df = test_df.copy()
+
+    (
+        train_df["make_model_year_price_median"],
+        test_df["make_model_year_price_median"],
+        make_model_year_price_median_map,
+        make_model_year_price_median_global,
+    ) = make_oof_group_median(
+        train_df=train_df,
+        test_df=test_df,
+        group_cols=["make", "model", "year"],
+        target_col=target_col,
+        n_splits=n_splits,
+        random_state=random_state,
+    )
+
+    feature_stats_bundle = {
+        "make_model_year_price_median_map": make_model_year_price_median_map,
+        "make_model_year_price_median_global": make_model_year_price_median_global,
+    }
+
+    for col in CAT_COLS:
+        train_df[col] = train_df[col].astype("string").fillna("UNKNOWN")
+        test_df[col] = test_df[col].astype("string").fillna("UNKNOWN")
+
+    for col in NUM_COLS:
+        train_df[col] = pd.to_numeric(train_df[col], errors="coerce").replace([np.inf, -np.inf], np.nan)
+        test_df[col] = pd.to_numeric(test_df[col], errors="coerce").replace([np.inf, -np.inf], np.nan)
+
+    return train_df, test_df, feature_stats_bundle
+
+
+def apply_saved_feature_engineering(df: pd.DataFrame, feature_stats_bundle: dict) -> pd.DataFrame:
+    df = df.copy()
+
+    key_mmy = make_group_key(df, ["make", "model", "year"])
+    df["make_model_year_price_median"] = key_mmy.map(
+        feature_stats_bundle["make_model_year_price_median_map"]
+    ).fillna(feature_stats_bundle["make_model_year_price_median_global"])
+
+    for col in CAT_COLS:
+        df[col] = df[col].astype("string").fillna("UNKNOWN")
+
+    for col in NUM_COLS:
+        df[col] = pd.to_numeric(df[col], errors="coerce").replace([np.inf, -np.inf], np.nan)
+
+    return df
+
+# ==========================
+# PREPROCESSORS
+# ==========================
+def build_ohe_preprocessor() -> ColumnTransformer:
+    return ColumnTransformer(
+        transformers=[
+            (
+                "num",
+                Pipeline([
+                    ("imputer", SimpleImputer(strategy="median")),
+                ]),
+                NUM_COLS,
+            ),
+            (
+                "cat",
+                Pipeline([
+                    ("imputer", SimpleImputer(strategy="constant", fill_value="UNKNOWN")),
+                    ("onehot", OneHotEncoder(handle_unknown="ignore")),
+                ]),
+                CAT_COLS,
+            ),
+        ],
+        remainder="drop",
+    )
+
+# ==========================
+# MODEL BUILDERS
+# ==========================
+def build_ohe_model_pipeline(model_name: str) -> Pipeline:
+    model_name = model_name.lower()
+
+    if model_name == "linear_regression":
+        reg = LinearRegression()
+
+    elif model_name == "random_forest":
+        reg = RandomForestRegressor(
+            n_estimators=300,
+            max_depth=8,
+            min_samples_split=5,
+            min_samples_leaf=2,
+            n_jobs=-1,
+            random_state=RANDOM_STATE,
+        )
+
+    elif model_name == "xgboost":
+        reg = XGBRegressor(
+            n_estimators=800,
+            learning_rate=0.05,
+            max_depth=9,
+            subsample=0.9,
+            colsample_bytree=0.9,
+            random_state=RANDOM_STATE,
+            n_jobs=-1,
+        )
+
+    else:
+        raise ValueError(f"Unknown OHE model_name: {model_name}")
+
+    return Pipeline([
+        ("prep", build_ohe_preprocessor()),
+        ("reg", reg),
+    ])
+
+# ==========================
+# TRAIN / EVAL HELPERS
+# ==========================
+def train_and_evaluate_ohe_model(
+    model_name: str,
+    X_train: pd.DataFrame,
+    X_test: pd.DataFrame,
+    y_train_linear: pd.Series,
+    y_test_linear: pd.Series,
+    y_train_log: pd.Series,
+):
+    print(f"\n{'=' * 70}")
+    print(f"MODEL: {model_name}")
+    print(f"{'=' * 70}")
+
+    linear_model = build_ohe_model_pipeline(model_name)
+    linear_model.fit(X_train, y_train_linear)
+
+    pred_test_linear = linear_model.predict(X_test)
+    pred_test_linear = np.clip(pred_test_linear, MIN_PRICE, MAX_PRICE)
+
+    linear_metrics = evaluate_regression(
+        y_test_linear,
+        pred_test_linear,
+        title=f"{model_name.upper()} | LINEAR TARGET",
+    )
+
+    log_model = build_ohe_model_pipeline(model_name)
+    log_model.fit(X_train, y_train_log)
+
+    pred_test_log_raw = log_model.predict(X_test)
+    pred_test_log = np.exp(pred_test_log_raw)
+    pred_test_log = np.clip(pred_test_log, MIN_PRICE, MAX_PRICE)
+
+    log_metrics = evaluate_regression(
+        y_test_linear,
+        pred_test_log,
+        title=f"{model_name.upper()} | LOG TARGET",
+    )
+
+    pred_test_blend = blend_predictions(
+        pred_linear=pred_test_linear,
+        pred_log=pred_test_log,
+        linear_weight=BLEND_LINEAR_WEIGHT,
+        log_weight=BLEND_LOG_WEIGHT,
+        min_price=MIN_PRICE,
+        max_price=MAX_PRICE,
+    )
+
+    blend_metrics = evaluate_regression(
+        y_test_linear,
+        pred_test_blend,
+        title=f"{model_name.upper()} | BLEND",
+    )
+
+    return {
+        "model_name": model_name,
+        "linear_model": linear_model,
+        "log_model": log_model,
+        "linear_metrics": linear_metrics,
+        "log_metrics": log_metrics,
+        "blend_metrics": blend_metrics,
+        "y_test_true": y_test_linear,
+        "pred_test_linear": pred_test_linear,
+        "pred_test_log": pred_test_log,
+        "pred_test_blend": pred_test_blend,
+    }
+
+# ==========================
+# INFERENCE HELPERS
+# ==========================
+def preprocess_raw_df_for_bundle(raw_df: pd.DataFrame, bundle: dict) -> pd.DataFrame:
+    df = preprocess_base_rowwise(raw_df)
+    df = apply_base_preprocess(df, bundle["base_preprocess_bundle"], is_training=False)
+    df = apply_saved_feature_engineering(df, bundle["feature_stats_bundle"])
+
+    missing = [c for c in bundle["features"] if c not in df.columns]
+    if missing:
+        raise ValueError(f"Missing columns after feature engineering: {missing}")
+
+    return df[bundle["features"]].copy()
+
+# ==========================
+# MAIN BENCHMARK
+# ==========================
+if __name__ == "__main__":
+    df_raw = pd.read_csv(CSV_PATH)
+
+    raw_train_df, raw_test_df = train_test_split(
+        df_raw,
+        test_size=TEST_SIZE,
+        random_state=RANDOM_STATE,
+    )
+
+    raw_train_df = raw_train_df.reset_index(drop=True)
+    raw_test_df = raw_test_df.reset_index(drop=True)
+
+    train_rowwise = preprocess_base_rowwise(raw_train_df)
+    test_rowwise = preprocess_base_rowwise(raw_test_df)
+
+    base_preprocess_bundle = fit_base_preprocess_bundle(train_rowwise)
+
+    train_df = apply_base_preprocess(train_rowwise, base_preprocess_bundle, is_training=True)
+    test_df = apply_base_preprocess(test_rowwise, base_preprocess_bundle, is_training=True)
+
+    print("Train size after base preprocessing:", len(train_df))
+    print("Test size after base preprocessing :", len(test_df))
+    print("Train price min/max:", train_df[TARGET].min(), train_df[TARGET].max())
+    print("Mean test price:", test_df[TARGET].mean())
+
+    train_fe, test_fe, feature_stats_bundle = build_train_test_features(
+        train_df=train_df,
+        test_df=test_df,
+        target_col=TARGET,
+        n_splits=N_SPLITS,
+        random_state=RANDOM_STATE,
+    )
+
+    missing_train = [c for c in FEATURES if c not in train_fe.columns]
+    missing_test = [c for c in FEATURES if c not in test_fe.columns]
+
+    if missing_train:
+        raise ValueError(f"Missing columns in train_fe: {missing_train}")
+
+    if missing_test:
+        raise ValueError(f"Missing columns in test_fe: {missing_test}")
+
+    X_train = train_fe[FEATURES].copy()
+    X_test = test_fe[FEATURES].copy()
+
+    y_train_linear = train_fe[TARGET].astype(float).copy()
+    y_test_linear = test_fe[TARGET].astype(float).copy()
+
+    y_train_log = np.log(train_fe[TARGET].astype(float))
+
+    model_names = [
+        "linear_regression",
+        "random_forest",
+        "xgboost",
+    ]
+
+    benchmark_rows = []
+    fitted_results = {}
+
+    for model_name in model_names:
+        result = train_and_evaluate_ohe_model(
+            model_name=model_name,
+            X_train=X_train,
+            X_test=X_test,
+            y_train_linear=y_train_linear,
+            y_test_linear=y_test_linear,
+            y_train_log=y_train_log,
+        )
+
+        fitted_results[model_name] = result
+
+        benchmark_rows.append({
+            "model": f"{model_name}_linear",
+            **result["linear_metrics"],
+        })
+
+        benchmark_rows.append({
+            "model": f"{model_name}_log",
+            **result["log_metrics"],
+        })
+
+        benchmark_rows.append({
+            "model": f"{model_name}_blend",
+            **result["blend_metrics"],
+        })
+
+    comparison_df = pd.DataFrame(benchmark_rows)
+
+    print("\nOVERALL COMPARISON")
+    print(comparison_df.sort_values("MAE").to_string(index=False))
+
+    best_row = comparison_df.sort_values("MAE", ascending=True).iloc[0]
+
+    print("\nBEST MODEL:")
+    print(best_row.to_string())
+
+    best_model_full_name = best_row["model"]
+
+    if best_model_full_name.endswith("_linear"):
+        best_model_name = best_model_full_name[:-7]
+        best_prediction_key = "pred_test_linear"
+
+    elif best_model_full_name.endswith("_blend"):
+        best_model_name = best_model_full_name[:-6]
+        best_prediction_key = "pred_test_blend"
+
+    elif best_model_full_name.endswith("_log"):
+        best_model_name = best_model_full_name[:-4]
+        best_prediction_key = "pred_test_log"
+
+    else:
+        raise ValueError(f"Cannot parse best model name: {best_model_full_name}")
+
+    best_result = fitted_results[best_model_name]
+    best_pred = best_result[best_prediction_key]
+
+    bundle = {
+        "features": FEATURES,
+        "num_cols": NUM_COLS,
+        "cat_cols": CAT_COLS,
+        "target": TARGET,
+        "min_price": MIN_PRICE,
+        "max_price": MAX_PRICE,
+        "linear_weight": BLEND_LINEAR_WEIGHT,
+        "log_weight": BLEND_LOG_WEIGHT,
+
+        "base_preprocess_bundle": base_preprocess_bundle,
+        "feature_stats_bundle": feature_stats_bundle,
+
+        "comparison_df": comparison_df.to_dict(orient="records"),
+        "best_model_row": best_row.to_dict(),
+
+        "linear_model": best_result["linear_model"],
+        "log_model": best_result["log_model"],
+
+        "best_prediction_mode": (
+            "linear" if best_model_full_name.endswith("_linear")
+            else "log" if best_model_full_name.endswith("_log")
+            else "blend"
+        ),
+    }
+
+    joblib.dump(bundle, OUTPUT_PATH)
+
+    print(f"\nSaved benchmark bundle to: {OUTPUT_PATH}")

@@ -1,0 +1,294 @@
+.adminPage {
+  padding: 32px;
+  font-family: Arial, sans-serif;
+  background: #f9fafb;
+  min-height: 100vh;
+}
+
+.adminHeader {
+  margin-bottom: 32px;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.adminTitle { margin: 0; }
+.adminSubtitle { margin: 6px 0 0; color: #666; }
+.adminSection { margin-bottom: 40px; }
+.adminSectionTitle { margin-bottom: 16px; }
+.adminEmpty { color: #666; }
+
+.adminGrid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  gap: 20px;
+}
+
+.adminCard {
+  border: 1px solid #e5e7eb;
+  border-radius: 16px;
+  overflow: hidden;
+  background: #fff;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.06);
+}
+
+.adminImageWrap {
+  position: relative;
+  height: 180px;
+  background: #f3f4f6;
+}
+
+.adminImage {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.adminNoImage {
+  height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #777;
+}
+
+.adminStatusBadge {
+  position: absolute;
+  top: 12px;
+  left: 12px;
+  z-index: 2;
+  color: #fff;
+  padding: 6px 10px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: bold;
+}
+
+.statusBadgePending { background: #f59e0b; }
+.statusBadgeApproved { background: #16a34a; }
+.statusBadgeRejected { background: #dc2626; }
+.statusBadgeDraft { background: #6b7280; }
+.statusBadgeDefault { background: #111827; }
+
+.adminCardBody { padding: 14px; }
+.adminCardTitle { margin: 0 0 6px; font-size: 18px; }
+.adminCardMeta { margin: 0 0 8px; color: #555; font-size: 14px; }
+
+.adminDescription {
+  margin: 0 0 12px;
+  color: #666;
+  font-size: 14px;
+  line-height: 1.4;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.adminPrice {
+  margin: 0 0 12px;
+  font-weight: bold;
+  color: #111827;
+}
+
+.adminCardActions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.adminDetailsBtn,
+.adminApproveBtnSmall,
+.adminRejectBtnSmall,
+.adminAuctionBtnSmall,
+.adminCancelBtn,
+.adminSaveBtn,
+.adminRejectBtn,
+.adminSecondaryBtn {
+  border-radius: 8px;
+  cursor: pointer;
+  font-weight: bold;
+}
+
+button:disabled {
+  cursor: not-allowed;
+  opacity: 0.65;
+}
+
+.adminDetailsBtn {
+  flex: 1 1 100%;
+  padding: 9px 12px;
+  border: 1px solid #d1d5db;
+  background: #fff;
+}
+
+.adminApproveBtnSmall {
+  flex: 1;
+  padding: 9px 12px;
+  border: none;
+  background: #16a34a;
+  color: #fff;
+}
+
+.adminRejectBtnSmall {
+  flex: 1;
+  padding: 9px 12px;
+  border: none;
+  background: #dc2626;
+  color: #fff;
+}
+
+.adminAuctionBtnSmall {
+  flex: 1 1 100%;
+  padding: 9px 12px;
+  border: none;
+  background: #111827;
+  color: #fff;
+}
+
+.adminError,
+.adminSuccess,
+.adminInfo {
+  padding: 12px 14px;
+  border-radius: 10px;
+  margin-bottom: 16px;
+}
+
+.adminError {
+  color: #991b1b;
+  background: #fee2e2;
+  border: 1px solid #fecaca;
+}
+
+.adminSuccess {
+  color: #166534;
+  background: #dcfce7;
+  border: 1px solid #86efac;
+}
+
+.adminInfo {
+  color: #1d4ed8;
+  background: #eff6ff;
+  border: 1px solid #bfdbfe;
+}
+
+.adminModalOverlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.45);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1000;
+  padding: 24px;
+}
+
+.adminModal,
+.adminLargeModal {
+  background: #fff;
+  border-radius: 16px;
+  padding: 24px;
+  box-shadow: 0 20px 40px rgba(0, 0, 0, 0.2);
+}
+
+.adminModal { width: 420px; }
+
+.adminLargeModal {
+  width: 880px;
+  max-height: 90vh;
+  overflow-y: auto;
+}
+
+.adminModalTitle { margin-top: 0; margin-bottom: 20px; }
+
+.adminDetailGrid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
+  gap: 12px;
+}
+
+.adminDetailItem {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  background: #f9fafb;
+  padding: 12px;
+  border-radius: 10px;
+}
+
+.adminDetailLabel {
+  color: #6b7280;
+  font-size: 13px;
+}
+
+.adminDetailDescription {
+  margin-top: 18px;
+  line-height: 1.5;
+}
+
+.adminDetailImages {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
+  gap: 12px;
+  margin-top: 18px;
+}
+
+.adminDetailImage {
+  width: 100%;
+  height: 120px;
+  object-fit: cover;
+  border-radius: 10px;
+}
+
+.adminLabel {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-bottom: 14px;
+  font-size: 14px;
+  color: #374151;
+}
+
+.adminInput {
+  height: 40px;
+  border-radius: 8px;
+  border: 1px solid #d1d5db;
+  padding: 0 10px;
+}
+
+.adminTextarea {
+  min-height: 110px;
+  border-radius: 8px;
+  border: 1px solid #d1d5db;
+  padding: 10px;
+  resize: vertical;
+  font-family: Arial, sans-serif;
+}
+
+.adminModalActions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+  margin-top: 20px;
+}
+
+.adminCancelBtn,
+.adminSecondaryBtn {
+  padding: 10px 14px;
+  border: 1px solid #d1d5db;
+  background: #fff;
+}
+
+.adminSaveBtn {
+  padding: 10px 14px;
+  border: none;
+  background: #16a34a;
+  color: #fff;
+}
+
+.adminRejectBtn {
+  padding: 10px 14px;
+  border: none;
+  background: #dc2626;
+  color: #fff;
+}

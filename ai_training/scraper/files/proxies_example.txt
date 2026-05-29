@@ -1,0 +1,2 @@
+Proxy privalo buti saugumos tokiu formatu:
+ip:port:username:password
